@@ -95,18 +95,115 @@ local function handleZoom(cam)
 end
 
 local function rotAnglesToVec(rot) -- input vector3
-    local z = math.rad(rot.z)
-    local x = math.rad(rot.x)
-    local num = math.abs(math.cos(x))
-    return vector3(-math.sin(z) * num, math.cos(z) * num, math.sin(x))
+    -- Validate input
+    if not rot or not rot.x or not rot.z then
+        return vector3(0.0, 1.0, 0.0) -- Default forward vector
+    end
+    
+    -- Ensure angles are within reasonable bounds
+    local safeX = math.max(-90, math.min(90, rot.x))
+    local safeZ = math.max(-360, math.min(360, rot.z))
+    
+    local z = math.rad(safeZ)
+    local x = math.rad(safeX)
+    
+    -- Handle potential math errors
+    local cosX = math.cos(x)
+    local absCosX = math.abs(cosX)
+    local sinZ = math.sin(z)
+    local cosZ = math.cos(z)
+    local sinX = math.sin(x)
+    
+    -- Check for math errors
+    if sinZ ~= sinZ or cosZ ~= cosZ or sinX ~= sinX or absCosX ~= absCosX then
+        return vector3(0.0, 1.0, 0.0) -- Default forward vector
+    end
+    
+    local result = vector3(-sinZ * absCosX, cosZ * absCosX, sinX)
+    
+    -- Normalize the result to ensure it's a valid direction vector
+    local length = math.sqrt(result.x * result.x + result.y * result.y + result.z * result.z)
+    
+    if length > 0 then
+        result = vector3(result.x / length, result.y / length, result.z / length)
+    else
+        result = vector3(0.0, 1.0, 0.0) -- Default forward vector
+    end
+    
+    return result
 end
 
 local function getVehicleInView(cam)
     local coords = GetCamCoord(cam)
-    local forwardVector = coords + (rotAnglesToVec(GetCamRot(cam, 2)) * 400.0)
-    --DrawLine(coords, coords + (forward_vector * 100.0), 255, 0, 0, 255) -- debug line to show LOS of cam
-    local rayHandle = CastRayPointToPoint(coords.x, coords.y, coords.z, forwardVector.x, forwardVector.y, forwardVector.z, 10, cache.vehicle, 0)
+    
+    -- Validate camera coordinates
+    if not coords or not coords.x or not coords.y or not coords.z then
+        return nil
+    end
+    
+    -- Check for NaN in coordinates
+    if coords.x ~= coords.x or coords.y ~= coords.y or coords.z ~= coords.z then
+        return nil
+    end
+    
+    local camRot = GetCamRot(cam, 2)
+    
+    -- Validate camera rotation
+    if not camRot or not camRot.x or not camRot.y or not camRot.z then
+        return nil
+    end
+    
+    -- Check for NaN in rotation
+    if camRot.x ~= camRot.x or camRot.y ~= camRot.y or camRot.z ~= camRot.z then
+        return nil
+    end
+    
+    -- Clamp rotation values to prevent extreme angles
+    local safeX = math.max(-90, math.min(90, camRot.x))
+    local safeZ = math.max(-180, math.min(180, camRot.z))
+    
+    local forwardVector = rotAnglesToVec(vector3(safeX, 0.0, safeZ))
+    
+    -- Validate forward vector
+    if not forwardVector or not forwardVector.x or not forwardVector.y or not forwardVector.z then
+        return nil
+    end
+    
+    -- Check for NaN in forward vector
+    if forwardVector.x ~= forwardVector.x or forwardVector.y ~= forwardVector.y or forwardVector.z ~= forwardVector.z then
+        return nil
+    end
+    
+    -- Calculate target point
+    local targetX = coords.x + (forwardVector.x * 400.0)
+    local targetY = coords.y + (forwardVector.y * 400.0)
+    local targetZ = coords.z + (forwardVector.z * 400.0)
+    
+    -- Final validation of target coordinates
+    if targetX ~= targetX or targetY ~= targetY or targetZ ~= targetZ then
+        return nil
+    end
+    
+    -- Debug logging (you can remove this after fixing)
+    -- print(string.format("CastRay: From (%.2f, %.2f, %.2f) to (%.2f, %.2f, %.2f)", 
+    --     coords.x, coords.y, coords.z, targetX, targetY, targetZ))
+    
+    -- Cast the ray with safe fallback
+    local success, rayHandle = pcall(function()
+        return CastRayPointToPoint(
+            coords.x, coords.y, coords.z,
+            targetX, targetY, targetZ,
+            10, cache.vehicle, 0
+        )
+    end)
+    
+    if not success then
+        -- print("CastRayPointToPoint failed: " .. tostring(rayHandle))
+        return nil
+    end
+    
     local _, _, _, _, entityHit = GetRaycastResult(rayHandle)
+    
     return entityHit <= 0 and nil or IsEntityAVehicle(entityHit) and entityHit
 end
 
@@ -244,10 +341,16 @@ local function handleInVehicle()
             if IsControlJustPressed(0, toggleVision) then
                 changeVision()
             end
+            
+            -- Vérifier si la caméra existe toujours
+            if not DoesCamExist(cam) then
+                -- Camera was destroyed somehow, exit the loop
+                break
+            end
+            
             local zoomValue = 0
             if lockedOnVehicle then
                 if DoesEntityExist(lockedOnVehicle) then
-
                     PointCamAtEntity(cam, lockedOnVehicle, 0.0, 0.0, 0.0, true)
                     if IsControlJustPressed(0, toggleLockOn) then
                         cam = unlockCam(cam)
@@ -262,8 +365,19 @@ local function handleInVehicle()
             else
                 zoomValue = (1.0 / (FOV_MAX - FOV_MIN)) * (fov - FOV_MIN)
                 checkInputRotation(cam, zoomValue)
-                vehicleDetected = getVehicleInView(cam)
-                vehicleLockState = DoesEntityExist(vehicleDetected) and VEHICLE_LOCK_STATE.scanning or VEHICLE_LOCK_STATE.dormant
+                
+                -- Only try to detect vehicles if the camera is valid
+                vehicleDetected = nil
+                if DoesCamExist(cam) then
+                    vehicleDetected = getVehicleInView(cam)
+                end
+                
+                if vehicleDetected and DoesEntityExist(vehicleDetected) then
+                    vehicleLockState = VEHICLE_LOCK_STATE.scanning
+                else
+                    vehicleLockState = VEHICLE_LOCK_STATE.dormant
+                    vehicleDetected = nil
+                end
             end
             handleZoom(cam)
             hideHudThisFrame()
@@ -280,7 +394,9 @@ local function handleInVehicle()
         fov = (FOV_MAX + FOV_MIN) * 0.5 -- reset to starting zoom level
         RenderScriptCams(false, false, 0, true, false) -- Return to gameplay camera
         SetScaleformMovieAsNoLongerNeeded(scaleform) -- Cleanly release the scaleform
-        DestroyCam(cam, false)
+        if DoesCamExist(cam) then
+            DestroyCam(cam, false)
+        end
         SetNightvision(false)
         SetSeethrough(false)
     end
